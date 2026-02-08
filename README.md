@@ -29,8 +29,8 @@ Scripts e Docker Compose para automatizar uma stack de hospedagem WordPress de a
 
 4. **Criar um novo projeto WordPress** (usuário, banco de dados, container, vhost NGINX, SSL opcional):
    ```bash
-   export MYSQL_ROOT_PASSWORD=sua_senha_root_mysql
-   sudo ./create_project.sh meusite exemplo.com 'SenhaFtp'
+   export MYSQL_ROOT_PASSWORD=your_mysql_root_password
+   sudo ./create_project.sh mysite example.com 'FtpPassword'
    ```
 
 5. **Backup** (MySQL, uploads, configurações; executar diariamente via cron):
