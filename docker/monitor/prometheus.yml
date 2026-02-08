@@ -1,0 +1,29 @@
+# WHALE - Prometheus: scrape metrics for Grafana alerts
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: nginx
+    static_configs:
+      # Add nginx-exporter or stub_status if needed
+      - targets: []
+    relabel_configs: []
+
+  - job_name: docker
+    static_configs:
+      - targets: []
+    # Optional: cAdvisor for container metrics
+    # - job_name: cadvisor
+    #   static_configs:
+    #     - targets: ['cadvisor:8080']
+
+alerting:
+  alertmanagers: []
+  # Configure in Grafana or add Alertmanager
+
+rule_files: []

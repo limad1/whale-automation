@@ -1,0 +1,238 @@
+# =============================================================================
+# WHALE Stack: NGINX, WordPress (x2), MySQL, Portainer, Loki, Promtail, Grafana
+# Optional: Bacula can be added or run via host backup.sh
+# =============================================================================
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # NGINX - Reverse proxy and load balancer
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: whale-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - certbot_www:/var/www/certbot:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - wordpress1
+      - wordpress2
+    networks:
+      - whale-net
+    labels:
+      logging: promtail
+      logging_jobname: nginx
+
+  # ---------------------------------------------------------------------------
+  # WordPress instances (scalable: add wordpress3, etc.)
+  # ---------------------------------------------------------------------------
+  wordpress1:
+    image: wordpress:php8.2-apache
+    container_name: whale-wp1
+    restart: unless-stopped
+    expose:
+      - "80"
+    environment:
+      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+    volumes:
+      - wp1_data:/var/www/html
+    networks:
+      - whale-net
+    labels:
+      logging: promtail
+      logging_jobname: wordpress1
+
+  wordpress2:
+    image: wordpress:php8.2-apache
+    container_name: whale-wp2
+    restart: unless-stopped
+    expose:
+      - "80"
+    environment:
+      WORDPRESS_DB_HOST: mysql
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+    volumes:
+      - wp2_data:/var/www/html
+    networks:
+      - whale-net
+    labels:
+      logging: promtail
+      logging_jobname: wordpress2
+
+  # ---------------------------------------------------------------------------
+  # MySQL - Single DB for WordPress (shared or per-project via create_project)
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: whale-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - whale-net
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    labels:
+      logging: promtail
+      logging_jobname: mysql
+
+  # ---------------------------------------------------------------------------
+  # Portainer - Container management UI
+  # ---------------------------------------------------------------------------
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: whale-portainer
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - whale-net
+
+  # ---------------------------------------------------------------------------
+  # Grafana Loki - Log aggregation
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: whale-loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitor/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/loki-config.yaml
+    networks:
+      - whale-net
+
+  # ---------------------------------------------------------------------------
+  # Promtail - Log shipper to Loki
+  # ---------------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: whale-promtail
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitor/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - promtail_positions:/tmp
+      - nginx_logs:/var/log/nginx:ro
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      - loki
+    networks:
+      - whale-net
+
+  # ---------------------------------------------------------------------------
+  # Grafana - Dashboards and alerts
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.2.2
+    container_name: whale-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3000}"
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitor/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - loki
+    networks:
+      - whale-net
+
+  # ---------------------------------------------------------------------------
+  # Prometheus - Metrics (optional, for alerts)
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: whale-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitor/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    networks:
+      - whale-net
+
+  # ---------------------------------------------------------------------------
+  # Uptime Kuma - Uptime monitoring (monitors added automatically by create_project.sh)
+  # ---------------------------------------------------------------------------
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: whale-uptime-kuma
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+    environment:
+      - TZ=UTC
+    networks:
+      - whale-net
+    # Run as non-root (Uptime Kuma image uses node user)
+    labels:
+      logging: promtail
+      logging_jobname: uptime-kuma
+
+  # ---------------------------------------------------------------------------
+  # Certbot - Let's Encrypt (run once or via cron)
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    container_name: whale-certbot
+    volumes:
+      - ./nginx/ssl:/etc/letsencrypt:rw
+      - certbot_www:/var/www/certbot:rw
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $!; done;'"
+    networks:
+      - whale-net
+    profiles:
+      - ssl
+
+networks:
+  whale-net:
+    name: whale-net
+    driver: bridge
+
+volumes:
+  mysql_data:
+  wp1_data:
+  wp2_data:
+  portainer_data:
+  loki_data:
+  grafana_data:
+  prometheus_data:
+  promtail_positions:
+  certbot_www:
+    name: whale_certbot_www
+  nginx_logs:
+  uptime-kuma-data:
